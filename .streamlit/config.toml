@@ -1,0 +1,5 @@
+[server]
+maxUploadSize = 20  # MB, for uploaded CSV datasets
+
+[theme]
+primaryColor = "#4F46E5"

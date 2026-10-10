@@ -21,7 +21,8 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Checkpointer, Send
 from pydantic import BaseModel, Field
 
-from ds_team.agents import AGENT_SPECS, AgentSpec, build_agents
+from ds_team import config
+from ds_team.agents import AgentSpec, build_agents, enabled_specs
 from ds_team.config import DB_PATH, get_model
 
 # how many past user turns the Team Leader sees (older messages stay in the checkpoint)
@@ -41,7 +42,7 @@ How to work:
 - Use `remember` to save important facts such as data paths, model paths and src files, and anything the user asks you to remember.
 - If a member reports an error, work out an approach to debug and solve it.
 - Answer simple questions yourself without delegating.
-
+{execution_note}
 Session notes:
 {notes}"""
 
@@ -95,23 +96,49 @@ def _recent_turns(messages: list[AnyMessage], turns: int = HISTORY_TURNS) -> lis
     return messages[start:]
 
 
+def _patch_dangling_tool_calls(messages: list[AnyMessage]) -> list[AnyMessage]:
+    """Add a placeholder result for tool calls that never got one (e.g. a turn that crashed),
+    because chat APIs reject a tool call without a matching tool result."""
+    answered = {m.tool_call_id for m in messages if isinstance(m, ToolMessage)}
+    patched = []
+    for message in messages:
+        patched.append(message)
+        for call in getattr(message, "tool_calls", None) or []:
+            if call["id"] not in answered:
+                patched.append(ToolMessage("Cancelled: this task was interrupted.", tool_call_id=call["id"], status="error"))
+    return patched
+
+
 def _format_notes(notes: dict[str, str]) -> str:
     return "\n".join(f"- {key}: {value}" for key, value in notes.items())
 
 
 # ============================ Graph =================================
 
-def build_graph(model: BaseChatModel | None = None, checkpointer: Checkpointer = None) -> CompiledStateGraph:
+def build_graph(
+    model: BaseChatModel | None = None,
+    checkpointer: Checkpointer = None,
+    allow_code_execution: bool | None = None,
+) -> CompiledStateGraph:
     """Build the Data Science Team graph. Without a checkpointer the graph has no memory."""
     model = model or get_model()
-    agents = build_agents(model)
-    delegations = {f"delegate_to_{spec.name}": spec.name for spec in AGENT_SPECS}
-    leader_model = model.bind_tools([_delegation_tool(spec) for spec in AGENT_SPECS] + [remember])
-    team = "\n".join(f"- {spec.name}: {spec.description}" for spec in AGENT_SPECS)
+    if allow_code_execution is None:
+        allow_code_execution = config.ALLOW_CODE_EXECUTION
+    specs = enabled_specs(allow_code_execution)
+    agents = build_agents(model, specs)
+    delegations = {f"delegate_to_{spec.name}": spec.name for spec in specs}
+    leader_model = model.bind_tools([_delegation_tool(spec) for spec in specs] + [remember])
+    team = "\n".join(f"- {spec.name}: {spec.description}" for spec in specs)
+    execution_note = "" if allow_code_execution else (
+        "- Code execution is disabled in this deployment: nothing can be saved, run or installed. "
+        "The coding member can still write code in its reply for the user to run locally.\n"
+    )
 
     def team_leader(state: TeamState) -> dict:
-        prompt = TEAM_LEADER_PROMPT.format(team=team, notes=_format_notes(state.get("notes") or {}) or "(none yet)")
-        response = leader_model.invoke([SystemMessage(prompt), *_recent_turns(state["messages"])])
+        notes = _format_notes(state.get("notes") or {}) or "(none yet)"
+        prompt = TEAM_LEADER_PROMPT.format(team=team, notes=notes, execution_note=execution_note)
+        history = _patch_dangling_tool_calls(_recent_turns(state["messages"]))
+        response = leader_model.invoke([SystemMessage(prompt), *history])
         return {"messages": [response]}
 
     def route_team_leader(state: TeamState) -> list[Send] | str:
