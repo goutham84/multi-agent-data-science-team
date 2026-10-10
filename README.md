@@ -65,13 +65,13 @@ How it works:
 - **Parallel delegation** with LangGraph `Send`
 - **Live streaming**: the Team Leader's tokens and each agent's tool calls appear as they happen, in the terminal, the API (Server-Sent Events) and the Streamlit app
 - **Human-in-the-loop approvals**: writing a file or installing a package pauses the graph with `interrupt()` until you approve, reject, or reply with feedback
-- **Safe mode for public deployments** (`ALLOW_CODE_EXECUTION=false`): agents can explore and plot data but cannot write, run or install anything
+- **Safe mode** (`ALLOW_CODE_EXECUTION=false`, the default in the web app): agents can explore and plot data but cannot write, run or install anything
 - **Sandboxed tools**: file access is limited to the project folder, and shell commands are limited to an allow-list
 - **LangSmith tracing**: every agent, tool and LLM call is traced, grouped by conversation thread
 - **Persistent memory**: conversations and session notes are stored in SQLite (`memory.db`)
 - **Groq or OpenAI, chosen in `.env`**: `LLM_PROVIDER=groq|openai` + `LLM_MODEL`. The default is Groq `openai/gpt-oss-120b`, with retries for Groq's rate limits and malformed tool calls
 - **Model training pipeline** with MAE / RMSE / R² evaluation
-- **Tested offline**: 34 pytest tests, including the Streamlit UI and Groq request payloads, run in GitHub Actions on every push
+- **Tested offline**: 49 pytest tests, including the Streamlit UI and Groq request payloads, run in GitHub Actions on every push
 
 ---
 
@@ -163,7 +163,7 @@ multi-agent-data-science-team/
 │   ├── preprocessing.py       # Train/test split, scaling + one-hot encoding
 │   └── train.py               # Trains and evaluates models (MAE / RMSE / R²)
 │
-├── tests/                     # 34 pytest tests (scripted model + fake Groq client, no API key needed)
+├── tests/                     # 49 pytest tests (scripted model + fake Groq client, no API key needed)
 ├── .github/workflows/         # CI: runs the tests on every push
 ├── .streamlit/                # Streamlit config + secrets template
 │
@@ -205,15 +205,23 @@ cp .env.example .env                     # then paste your API keys into .env
 
 ### Option 1: Streamlit web app
 
+**Live demo:** [multi-agent-data-science-team-v1.streamlit.app](https://multi-agent-data-science-team-v1.streamlit.app/)
+
 ```bash
 uv run streamlit run streamlit_app.py
 ```
 
-Open `http://localhost:8501`. In the app you can:
-- chat with the team and watch each agent's work live in a status panel
+Open `http://localhost:8501`. In the sidebar, each visitor chooses for their own session:
+- **🧠 Model:** provider (**Groq** or **OpenAI**), model (suggested list or any custom model id), reasoning effort (for reasoning models), and **their own API key** for that provider
+- **🔍 LangSmith tracing:** an on/off toggle, an optional LangSmith API key and the project name
+
+Keys are kept in memory for the session only, never saved. These settings apply only to that visitor's session, so one visitor's tracing or model choice doesn't affect others.
+
+In the chat you can:
+- watch each agent's work live in a status panel
 - upload your own CSV
 - see generated charts inline
-- approve or reject code in a form
+- approve or reject code (when code execution is enabled)
 
 ### Option 2: Terminal chat
 
@@ -346,25 +354,20 @@ If `LANGSMITH_API_KEY` is missing, tracing is switched off automatically, so the
 
 ## ☁️ Deploy on Streamlit Community Cloud
 
-1. Push this repo to GitHub (already done if you're reading this there).
-2. Go to [share.streamlit.io](https://share.streamlit.io) → **Create app** → choose this repository, branch `main`, main file `streamlit_app.py`.
-3. Under **Advanced settings**, select **Python 3.13** and paste your secrets (template in [.streamlit/secrets.toml.example](.streamlit/secrets.toml.example)):
+1. Go to [share.streamlit.io](https://share.streamlit.io) → **Create app** → choose this repository, branch `main`, main file `streamlit_app.py`. Under **Advanced settings**, select **Python 3.13**.
+2. Click **Deploy**. Dependencies are installed from `uv.lock`.
 
-   ```toml
-   LLM_PROVIDER = "groq"
-   LLM_MODEL = "openai/gpt-oss-120b"
-   LLM_REASONING_EFFORT = "low"
-   GROQ_API_KEY = "gsk_..."
-   ALLOW_CODE_EXECUTION = "false"     # safe mode for a public app
-   APP_PASSWORD = "choose-a-password" # optional: protects your API credits
-   LANGSMITH_TRACING = "true"
-   LANGSMITH_API_KEY = "lsv2_pt_..."
-   LANGSMITH_PROJECT = "Multi_agent_datascience_team"
-   ```
+**No secrets are required.** Visitors pick Groq or OpenAI in the sidebar and paste their own API key. The web app runs in **safe mode** by default: agents can explore and plot data, but cannot write files, run code or install packages.
 
-4. Click **Deploy**. Dependencies are installed from `uv.lock`.
+Optional secrets (App settings → **Secrets**, template in [.streamlit/secrets.toml.example](.streamlit/secrets.toml.example)):
 
-> ⚠️ **Keep `ALLOW_CODE_EXECUTION = "false"` on public deployments.** With it on, anyone who opens the app could approve code that runs on the server. If you leave out `GROQ_API_KEY`, visitors can paste their own key in the sidebar instead (it's only kept for their session).
+| Secret | Effect |
+|--------|--------|
+| `GROQ_API_KEY` / `OPENAI_API_KEY` | Visitors can chat without their own key, using **your** credits. Pair this with `APP_PASSWORD` |
+| `APP_PASSWORD` | Visitors must enter a password first |
+| `LLM_PROVIDER`, `LLM_MODEL`, `LLM_REASONING_EFFORT` | Default choices in the sidebar |
+| `LANGSMITH_API_KEY` (+ `LANGSMITH_TRACING = "true"`, `LANGSMITH_PROJECT`) | Tracing is on by default and goes to **your** LangSmith project. Visitors can still turn it off or use their own key |
+| `ALLOW_CODE_EXECUTION = "true"` | Turns off safe mode. ⚠️ Only for private deployments: anyone who can open the app could approve code that runs on the server |
 
 ---
 
@@ -378,7 +381,7 @@ If `LANGSMITH_API_KEY` is missing, tracing is switched off automatically, so the
 | `LLM_TEMPERATURE` | `0.3` on Groq, unset on OpenAI | gpt-5 models only accept their default |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` | — | Key for the chosen provider (names are case-sensitive on Linux) |
 | `MAX_RETRIES` | `6` | Retries with backoff on rate limits (429) |
-| `ALLOW_CODE_EXECUTION` | `true` | `false` = safe mode: no file writes, code runs or installs |
+| `ALLOW_CODE_EXECUTION` | `true` (CLI/API), `false` (Streamlit app) | `false` = safe mode: no file writes, code runs or installs |
 | `APP_PASSWORD` | — | Optional password for the Streamlit app |
 | `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT` | — | LangSmith tracing |
 
@@ -392,7 +395,7 @@ If `LANGSMITH_API_KEY` is missing, tracing is switched off automatically, so the
 uv run pytest
 ```
 
-There are 34 tests. They use a scripted fake chat model (which also streams) and a fake Groq client, so they run offline with no API key. They cover:
+There are 49 tests. They use a scripted fake chat model (which also streams) and a fake Groq client, so they run offline with no API key. They cover:
 - delegation and session notes
 - parallel delegation
 - the approve and reject flow
@@ -401,7 +404,7 @@ There are 34 tests. They use a scripted fake chat model (which also streams) and
 - model training
 - **LLM configuration**: both providers, default models, overrides and invalid values
 - **Groq compatibility**: the real `ChatGroq` class with a fake HTTP client checks the message and tool payloads, streaming, and the `tool_use_failed` retry
-- the **Streamlit app itself**, via Streamlit's `AppTest`: chat, approval form and safe mode
+- the **Streamlit app itself**, via Streamlit's `AppTest`: provider/model/key selection, chat, approval form, safe mode and the tracing toggle
 
 [GitHub Actions](.github/workflows/tests.yml) runs the suite on every push and pull request.
 

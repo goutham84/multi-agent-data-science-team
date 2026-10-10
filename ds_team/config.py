@@ -21,20 +21,33 @@ DB_PATH = BASE_DIR / "memory.db"
 DEFAULT_DATASET = DATA_DIR / "car_details.csv"
 
 
-def _env_flag(name: str, default: bool) -> bool:
+def env_flag(name: str, default: bool) -> bool:
     value = os.getenv(name)
     return default if value is None else value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 # ============================ LLM ===================================
-# Choose the LLM in .env:
+# Choose the LLM in .env (or per session in the Streamlit sidebar):
 #   LLM_PROVIDER = groq | openai
 #   LLM_MODEL    = model id on that provider (optional, defaults below)
 # Groq model ids: https://console.groq.com/docs/models
 PROVIDERS = {
-    "groq": {"api_key": "GROQ_API_KEY", "default_model": "openai/gpt-oss-120b"},
-    "openai": {"api_key": "OPENAI_API_KEY", "default_model": "gpt-5-mini"},
+    "groq": {
+        "label": "Groq",
+        "api_key": "GROQ_API_KEY",
+        "key_url": "https://console.groq.com/keys",
+        "default_model": "openai/gpt-oss-120b",
+        "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"],
+    },
+    "openai": {
+        "label": "OpenAI",
+        "api_key": "OPENAI_API_KEY",
+        "key_url": "https://platform.openai.com/api-keys",
+        "default_model": "gpt-5-mini",
+        "models": ["gpt-5-mini", "gpt-5", "gpt-5-nano", "gpt-4.1-mini", "gpt-4.1"],
+    },
 }
+REASONING_EFFORTS = ["low", "medium", "high"]
 
 # Lower temperature makes open models write well-formed tool calls more reliably.
 # Nothing is sent for OpenAI: gpt-5 models only accept their default temperature.
@@ -46,7 +59,8 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "6"))
 
 # Let agents write files, run Python and install packages. Turn this off for public
 # deployments: anyone who can open the app could otherwise approve code on your server.
-ALLOW_CODE_EXECUTION = _env_flag("ALLOW_CODE_EXECUTION", True)
+# (The Streamlit app is stricter: it keeps this off unless the variable is set explicitly.)
+ALLOW_CODE_EXECUTION = env_flag("ALLOW_CODE_EXECUTION", True)
 
 # LangSmith: with LANGSMITH_TRACING=true and LANGSMITH_API_KEY set, LangChain and
 # LangGraph trace every run automatically (no code changes needed).
@@ -54,25 +68,29 @@ LANGSMITH_PROJECT = os.getenv("LANGSMITH_PROJECT", "default")
 
 
 def tracing_enabled() -> bool:
-    return _env_flag("LANGSMITH_TRACING", False) and bool(os.getenv("LANGSMITH_API_KEY"))
+    return env_flag("LANGSMITH_TRACING", False) and bool(os.getenv("LANGSMITH_API_KEY"))
 
 
 # tracing switched on without a key would log an error on every run, so switch it off
-if _env_flag("LANGSMITH_TRACING", False) and not os.getenv("LANGSMITH_API_KEY"):
+if env_flag("LANGSMITH_TRACING", False) and not os.getenv("LANGSMITH_API_KEY"):
     os.environ["LANGSMITH_TRACING"] = "false"
 
 
-def provider() -> str:
-    """The configured LLM provider: "groq" or "openai"."""
-    name = os.getenv("LLM_PROVIDER", "groq").strip().lower()
+def provider(name: str | None = None) -> str:
+    """The LLM provider: `name` if given, else LLM_PROVIDER from the environment (default groq)."""
+    name = (name or os.getenv("LLM_PROVIDER") or "groq").strip().lower()
     if name not in PROVIDERS:
         raise ValueError(f"LLM_PROVIDER must be one of {sorted(PROVIDERS)}, got {name!r}")
     return name
 
 
-def model_name() -> str:
-    """The model id on the configured provider, e.g. "openai/gpt-oss-120b" on Groq."""
-    return os.getenv("LLM_MODEL", "").strip() or PROVIDERS[provider()]["default_model"]
+def model_name(provider_name: str | None = None) -> str:
+    """The model id to use on a provider. LLM_MODEL applies only to the provider set in the
+    environment; any other provider uses its default model."""
+    name = provider(provider_name)
+    if name == provider():
+        return os.getenv("LLM_MODEL", "").strip() or PROVIDERS[name]["default_model"]
+    return PROVIDERS[name]["default_model"]
 
 
 def model_label() -> str:
@@ -80,29 +98,44 @@ def model_label() -> str:
     return f"{provider()} / {model_name()}"
 
 
-def api_key_name() -> str:
-    """Environment variable holding the key for the configured provider, e.g. GROQ_API_KEY."""
-    return PROVIDERS[provider()]["api_key"]
+def api_key_name(provider_name: str | None = None) -> str:
+    """Environment variable holding the provider's key, e.g. GROQ_API_KEY."""
+    return PROVIDERS[provider(provider_name)]["api_key"]
 
 
-def get_model(api_key: str | None = None) -> BaseChatModel:
-    """Create the chat model configured in .env (LLM_PROVIDER, LLM_MODEL and optional
-    LLM_TEMPERATURE / LLM_REASONING_EFFORT). `api_key` overrides the key from the
-    environment (used by the Streamlit app)."""
-    kwargs = {"model_provider": provider(), "max_retries": MAX_RETRIES}
+def supports_reasoning_effort(provider_name: str, model: str) -> bool:
+    """Whether the model accepts `reasoning_effort` (others reject the parameter)."""
+    model = model.lower()
+    if provider(provider_name) == "openai":
+        return model.startswith(("gpt-5", "o1", "o3", "o4"))
+    return model.startswith(("openai/gpt-oss", "qwen/"))
+
+
+def get_model(
+    api_key: str | None = None,
+    provider_name: str | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> BaseChatModel:
+    """Create the chat model. Arguments override the environment (LLM_PROVIDER, LLM_MODEL,
+    LLM_REASONING_EFFORT, the provider's API key); the Streamlit sidebar uses them."""
+    name = provider(provider_name)
+    model = model or model_name(name)
+    kwargs = {"model_provider": name, "max_retries": MAX_RETRIES}
     if api_key:
         kwargs["api_key"] = api_key
 
-    temperature = os.getenv("LLM_TEMPERATURE", "").strip() or DEFAULT_TEMPERATURE.get(provider())
+    temperature = os.getenv("LLM_TEMPERATURE", "").strip() or DEFAULT_TEMPERATURE.get(name)
     if temperature is not None:
         kwargs["temperature"] = float(temperature)
 
-    # low / medium / high, for reasoning models (gpt-oss on Groq, gpt-5 on OpenAI).
+    # low / medium / high, for reasoning models (gpt-oss and Qwen on Groq, gpt-5 on OpenAI).
     # "low" uses far fewer tokens, which helps with Groq's per-minute token limits.
-    if effort := os.getenv("LLM_REASONING_EFFORT", "").strip().lower():
+    effort = (reasoning_effort or os.getenv("LLM_REASONING_EFFORT", "")).strip().lower()
+    if effort and supports_reasoning_effort(name, model):
         kwargs["reasoning_effort"] = effort
 
-    return init_chat_model(model_name(), **kwargs)
+    return init_chat_model(model, **kwargs)
 
 
 def is_retryable_model_error(error: Exception) -> bool:
