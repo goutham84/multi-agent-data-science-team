@@ -98,7 +98,7 @@ def _sidebar() -> str | None:
             )
             api_key = st.session_state.api_key or None
 
-        st.markdown(f"**Model:** `{config.MODEL}`")
+        st.markdown(f"**Model:** `{config.model_label()}`")
         if config.tracing_enabled():
             st.markdown(f"**LangSmith tracing:** on (project `{config.LANGSMITH_PROJECT}`)")
         else:

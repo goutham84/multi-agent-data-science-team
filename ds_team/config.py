@@ -26,17 +26,23 @@ def _env_flag(name: str, default: bool) -> bool:
     return default if value is None else value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-# "provider:model", e.g. "groq:openai/gpt-oss-120b", "groq:qwen/qwen3.8-27b" or "openai:gpt-5-mini".
-# Check which models your Groq key can use at https://console.groq.com/docs/models
-MODEL = os.getenv("MODEL", "groq:openai/gpt-oss-120b")
+# ============================ LLM ===================================
+# Choose the LLM in .env:
+#   LLM_PROVIDER = groq | openai
+#   LLM_MODEL    = model id on that provider (optional, defaults below)
+# Groq model ids: https://console.groq.com/docs/models
+PROVIDERS = {
+    "groq": {"api_key": "GROQ_API_KEY", "default_model": "openai/gpt-oss-120b"},
+    "openai": {"api_key": "OPENAI_API_KEY", "default_model": "gpt-5-mini"},
+}
+
+# Lower temperature makes open models write well-formed tool calls more reliably.
+# Nothing is sent for OpenAI: gpt-5 models only accept their default temperature.
+DEFAULT_TEMPERATURE = {"groq": 0.3}
 
 # Retries with backoff for rate limits (429). Groq's per-minute token limits are low and a
 # multi-agent turn makes many model calls, so retry generously; the SDK honours retry-after.
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "6"))
-
-# Lower temperature makes open models produce well-formed tool calls more reliably.
-# Not sent to OpenAI's gpt-5 models, which only accept their default temperature.
-GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.3"))
 
 # Let agents write files, run Python and install packages. Turn this off for public
 # deployments: anyone who can open the app could otherwise approve code on your server.
@@ -57,24 +63,46 @@ if _env_flag("LANGSMITH_TRACING", False) and not os.getenv("LANGSMITH_API_KEY"):
 
 
 def provider() -> str:
-    """The configured provider, e.g. "groq" or "openai"."""
-    return os.getenv("MODEL", MODEL).split(":", 1)[0].lower()
+    """The configured LLM provider: "groq" or "openai"."""
+    name = os.getenv("LLM_PROVIDER", "groq").strip().lower()
+    if name not in PROVIDERS:
+        raise ValueError(f"LLM_PROVIDER must be one of {sorted(PROVIDERS)}, got {name!r}")
+    return name
+
+
+def model_name() -> str:
+    """The model id on the configured provider, e.g. "openai/gpt-oss-120b" on Groq."""
+    return os.getenv("LLM_MODEL", "").strip() or PROVIDERS[provider()]["default_model"]
+
+
+def model_label() -> str:
+    """Short description for logs and the UI, e.g. "groq / openai/gpt-oss-120b"."""
+    return f"{provider()} / {model_name()}"
 
 
 def api_key_name() -> str:
     """Environment variable holding the key for the configured provider, e.g. GROQ_API_KEY."""
-    return f"{provider().upper()}_API_KEY"
+    return PROVIDERS[provider()]["api_key"]
 
 
 def get_model(api_key: str | None = None) -> BaseChatModel:
-    """Create the chat model configured in .env (MODEL=provider:model).
-    `api_key` overrides the key from the environment (used by the Streamlit app)."""
-    kwargs = {"max_retries": MAX_RETRIES}
+    """Create the chat model configured in .env (LLM_PROVIDER, LLM_MODEL and optional
+    LLM_TEMPERATURE / LLM_REASONING_EFFORT). `api_key` overrides the key from the
+    environment (used by the Streamlit app)."""
+    kwargs = {"model_provider": provider(), "max_retries": MAX_RETRIES}
     if api_key:
         kwargs["api_key"] = api_key
-    if provider() == "groq":
-        kwargs["temperature"] = GROQ_TEMPERATURE
-    return init_chat_model(os.getenv("MODEL", MODEL), **kwargs)
+
+    temperature = os.getenv("LLM_TEMPERATURE", "").strip() or DEFAULT_TEMPERATURE.get(provider())
+    if temperature is not None:
+        kwargs["temperature"] = float(temperature)
+
+    # low / medium / high, for reasoning models (gpt-oss on Groq, gpt-5 on OpenAI).
+    # "low" uses far fewer tokens, which helps with Groq's per-minute token limits.
+    if effort := os.getenv("LLM_REASONING_EFFORT", "").strip().lower():
+        kwargs["reasoning_effort"] = effort
+
+    return init_chat_model(model_name(), **kwargs)
 
 
 def is_retryable_model_error(error: Exception) -> bool:

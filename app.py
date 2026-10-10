@@ -86,7 +86,7 @@ def _sse(thread_id: str, graph_input) -> StreamingResponse:
 def health() -> dict:
     return {
         "status": "ok",
-        "model": config.MODEL,
+        "model": config.model_label(),
         "code_execution": config.ALLOW_CODE_EXECUTION,
         "langsmith_tracing": config.tracing_enabled(),
     }
@@ -161,7 +161,7 @@ def chat_in_terminal(thread_id: str | None = None) -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     thread_id = thread_id or str(uuid.uuid4())
     tracing = f"LangSmith project '{config.LANGSMITH_PROJECT}'" if config.tracing_enabled() else "off"
-    print(f"Data Science Team | model {config.MODEL} | tracing {tracing}")
+    print(f"Data Science Team | model {config.model_label()} | tracing {tracing}")
     print(f"Thread {thread_id}. Type 'exit' to quit.")
 
     while True:

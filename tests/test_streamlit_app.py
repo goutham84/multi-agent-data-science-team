@@ -19,7 +19,7 @@ def app_env(project, monkeypatch):
 
     import ds_team.graph
 
-    monkeypatch.setenv("MODEL", "groq:openai/gpt-oss-120b")
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
     monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
     monkeypatch.delenv("APP_PASSWORD", raising=False)
     monkeypatch.setattr(ds_team.graph, "sqlite_checkpointer", lambda *a, **k: InMemorySaver())

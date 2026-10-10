@@ -69,9 +69,9 @@ How it works:
 - **Sandboxed tools**: file access is limited to the project folder, and shell commands are limited to an allow-list
 - **LangSmith tracing**: every agent, tool and LLM call is traced, grouped by conversation thread
 - **Persistent memory**: conversations and session notes are stored in SQLite (`memory.db`)
-- **Runs on Groq** (`openai/gpt-oss-120b` by default) with retries for Groq's rate limits and malformed tool calls; any other `init_chat_model` provider (e.g. OpenAI) works by changing `MODEL`
+- **Groq or OpenAI, chosen in `.env`**: `LLM_PROVIDER=groq|openai` + `LLM_MODEL`. The default is Groq `openai/gpt-oss-120b`, with retries for Groq's rate limits and malformed tool calls
 - **Model training pipeline** with MAE / RMSE / R² evaluation
-- **Tested offline**: 28 pytest tests, including the Streamlit UI and Groq request payloads, run in GitHub Actions on every push
+- **Tested offline**: 34 pytest tests, including the Streamlit UI and Groq request payloads, run in GitHub Actions on every push
 
 ---
 
@@ -163,7 +163,7 @@ multi-agent-data-science-team/
 │   ├── preprocessing.py       # Train/test split, scaling + one-hot encoding
 │   └── train.py               # Trains and evaluates models (MAE / RMSE / R²)
 │
-├── tests/                     # 28 pytest tests (scripted model + fake Groq client, no API key needed)
+├── tests/                     # 34 pytest tests (scripted model + fake Groq client, no API key needed)
 ├── .github/workflows/         # CI: runs the tests on every push
 ├── .streamlit/                # Streamlit config + secrets template
 │
@@ -223,7 +223,7 @@ uv run app.py --thread <id>      # continue an earlier one
 ```
 
 ```text
-Data Science Team | model groq:openai/gpt-oss-120b | tracing LangSmith project 'Multi_agent_datascience_team'
+Data Science Team | model groq / openai/gpt-oss-120b | tracing LangSmith project 'Multi_agent_datascience_team'
 
 You: Explore car_details.csv and plot the price distribution
 
@@ -280,28 +280,46 @@ uv run src/train.py             # Training    -> models/model.joblib, reports/mo
 
 ---
 
-## ⚡ Using Groq
+## ⚡ Choosing the LLM: Groq or OpenAI
 
-Groq is the default provider. Create a free key at [console.groq.com/keys](https://console.groq.com/keys) and set it in `.env`:
+Pick the provider and model in `.env`. No code changes are needed:
 
 ```env
-MODEL=groq:openai/gpt-oss-120b
+# Groq (default)
+LLM_PROVIDER=groq
+LLM_MODEL=openai/gpt-oss-120b
+LLM_REASONING_EFFORT=low
 GROQ_API_KEY=gsk_...
+
+# OpenAI
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-5-mini
+OPENAI_API_KEY=sk-...
 ```
 
-| Model | Notes |
-|-------|-------|
-| `openai/gpt-oss-120b` (default) | Strongest tool use. Delegates to one agent at a time (no parallel tool calls) |
-| `openai/gpt-oss-20b` | Faster and lighter |
-| `qwen/qwen3.8-27b` | Preview model. Supports parallel tool calls |
+| Provider | Model | Notes |
+|----------|-------|-------|
+| Groq | `openai/gpt-oss-120b` **(default)** | Best tool use and reasoning. Delegates to one agent at a time |
+| Groq | `openai/gpt-oss-20b` | Faster and lighter |
+| Groq | `qwen/qwen3.8-27b` | Preview model. Supports parallel tool calls |
+| OpenAI | `gpt-5-mini` (default for OpenAI) | Any chat model with tool calling works, e.g. `gpt-5`, `gpt-4.1-mini` |
 
-Which models your key can use varies by account. Check [console.groq.com/docs/models](https://console.groq.com/docs/models). If you get `model_not_found`, pick another model from the list.
+Which Groq models your key can use varies by account. Check [console.groq.com/docs/models](https://console.groq.com/docs/models). If you get `model_not_found`, pick another model from the list.
+
+**`LLM_REASONING_EFFORT=low` makes a big difference on Groq.** The same request (plot fuel types + find the most common one, delegated to two agents) measured in LangSmith:
+
+| Reasoning effort | Time | Tokens |
+|------------------|-----:|-------:|
+| default (medium) | 62.7 s | 14,681 |
+| **low** | **4.9 s** | **5,947** |
+
+Both runs gave the same correct answer. At medium effort the turn went over Groq's per-minute token limit and spent most of its time waiting.
 
 How the project handles Groq's limits:
-- **Rate limits (429):** a multi-agent turn makes many model calls (about 10–15K tokens), and the free tier allows only a few thousand tokens per minute. The client retries with backoff (`MAX_RETRIES=6`) and honours Groq's `retry-after`, so a turn may slow down but won't fail.
+- **Rate limits (429):** the client retries with backoff (`MAX_RETRIES=6`) and honours Groq's `retry-after`, so a turn may slow down but won't fail.
 - **`tool_use_failed`:** open models sometimes produce a malformed tool call, which Groq rejects. The Team Leader and every agent retry the call (agents use LangChain's `ModelRetryMiddleware`). If it still fails, the agent reports the error instead of crashing the turn.
-- **Reliable tool calls:** the temperature is lowered to `0.3`.
-- **Key name:** must be exactly `GROQ_API_KEY`. Linux (Streamlit Cloud, CI) is case-sensitive, so `Groq_API_KEY` only works on Windows.
+- **Reliable tool calls:** the temperature defaults to `0.3` on Groq.
+- **Key name:** must be exactly `GROQ_API_KEY`. Linux (Streamlit Cloud, CI) is case-sensitive.
 
 ---
 
@@ -333,7 +351,9 @@ If `LANGSMITH_API_KEY` is missing, tracing is switched off automatically, so the
 3. Under **Advanced settings**, select **Python 3.13** and paste your secrets (template in [.streamlit/secrets.toml.example](.streamlit/secrets.toml.example)):
 
    ```toml
-   MODEL = "groq:openai/gpt-oss-120b"
+   LLM_PROVIDER = "groq"
+   LLM_MODEL = "openai/gpt-oss-120b"
+   LLM_REASONING_EFFORT = "low"
    GROQ_API_KEY = "gsk_..."
    ALLOW_CODE_EXECUTION = "false"     # safe mode for a public app
    APP_PASSWORD = "choose-a-password" # optional: protects your API credits
@@ -352,10 +372,12 @@ If `LANGSMITH_API_KEY` is missing, tracing is switched off automatically, so the
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `MODEL` | `groq:openai/gpt-oss-120b` | LLM as `provider:model` (e.g. `groq:openai/gpt-oss-20b`, `openai:gpt-5-mini`) |
+| `LLM_PROVIDER` | `groq` | `groq` or `openai` |
+| `LLM_MODEL` | `openai/gpt-oss-120b` (Groq) / `gpt-5-mini` (OpenAI) | Model id on that provider |
+| `LLM_REASONING_EFFORT` | provider default | `low` / `medium` / `high` for reasoning models (gpt-oss, gpt-5). `low` is much faster |
+| `LLM_TEMPERATURE` | `0.3` on Groq, unset on OpenAI | gpt-5 models only accept their default |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` | — | Key for the chosen provider (names are case-sensitive on Linux) |
 | `MAX_RETRIES` | `6` | Retries with backoff on rate limits (429) |
-| `GROQ_TEMPERATURE` | `0.3` | Lower = more reliable tool calls on Groq |
 | `ALLOW_CODE_EXECUTION` | `true` | `false` = safe mode: no file writes, code runs or installs |
 | `APP_PASSWORD` | — | Optional password for the Streamlit app |
 | `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT` | — | LangSmith tracing |
@@ -370,13 +392,14 @@ If `LANGSMITH_API_KEY` is missing, tracing is switched off automatically, so the
 uv run pytest
 ```
 
-There are 28 tests. They use a scripted fake chat model (which also streams) and a fake Groq client, so they run offline with no API key. They cover:
+There are 34 tests. They use a scripted fake chat model (which also streams) and a fake Groq client, so they run offline with no API key. They cover:
 - delegation and session notes
 - parallel delegation
 - the approve and reject flow
 - streaming events
 - tool sandboxing
 - model training
+- **LLM configuration**: both providers, default models, overrides and invalid values
 - **Groq compatibility**: the real `ChatGroq` class with a fake HTTP client checks the message and tool payloads, streaming, and the `tool_use_failed` retry
 - the **Streamlit app itself**, via Streamlit's `AppTest`: chat, approval form and safe mode
 

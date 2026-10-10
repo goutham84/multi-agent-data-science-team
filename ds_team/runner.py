@@ -26,7 +26,7 @@ def run_config(thread_id: str) -> dict:
         "recursion_limit": 100,
         "run_name": "data_science_team",
         "tags": ["multi-agent-data-science-team"],
-        "metadata": {"thread_id": thread_id, "model": config.MODEL},
+        "metadata": {"thread_id": thread_id, "provider": config.provider(), "model": config.model_name()},
     }
 
 

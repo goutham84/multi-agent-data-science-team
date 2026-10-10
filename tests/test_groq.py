@@ -67,8 +67,11 @@ def tool_use_failed() -> groq.BadRequestError:
 
 @pytest.fixture
 def groq_env(monkeypatch):
-    monkeypatch.setenv("MODEL", "groq:openai/gpt-oss-120b")
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("LLM_MODEL", "openai/gpt-oss-120b")
     monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+    for name in ("LLM_TEMPERATURE", "LLM_REASONING_EFFORT"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(time, "sleep", lambda seconds: None)  # skip retry backoff
 
 
@@ -86,20 +89,6 @@ def assert_valid_groq_conversation(messages: list[dict]) -> None:
         for call in message.get("tool_calls") or []:
             answers = [m for m in messages[i + 1:] if m["role"] == "tool"]
             assert call["id"] in {m["tool_call_id"] for m in answers}
-
-
-def test_get_model_builds_chatgroq(groq_env):
-    model = config.get_model()
-    assert isinstance(model, ChatGroq)
-    assert model.model_name == "openai/gpt-oss-120b"
-    assert model.temperature == config.GROQ_TEMPERATURE
-    assert model.max_retries == config.MAX_RETRIES
-    assert config.api_key_name() == "GROQ_API_KEY"
-
-
-def test_other_groq_model(groq_env, monkeypatch):
-    monkeypatch.setenv("MODEL", "groq:qwen/qwen3.8-27b")
-    assert config.get_model().model_name == "qwen/qwen3.8-27b"
 
 
 def test_full_turn_with_streaming_and_approval(groq_env, project):
