@@ -1,0 +1,25 @@
+{
+  "target": "selling_price",
+  "log_target": true,
+  "train_rows": 2811,
+  "test_rows": 703,
+  "metrics": {
+    "ridge": {
+      "mae": 120352.69830799292,
+      "rmse": 189503.49834792354,
+      "r2": 0.748117317795393
+    },
+    "random_forest": {
+      "mae": 123792.89170456382,
+      "rmse": 207495.01893899988,
+      "r2": 0.6980192932922333
+    },
+    "hist_gradient_boosting": {
+      "mae": 120229.56991725753,
+      "rmse": 199168.18058810217,
+      "r2": 0.7217701266689491
+    }
+  },
+  "best_model": "ridge",
+  "model_path": "models/model.joblib"
+}

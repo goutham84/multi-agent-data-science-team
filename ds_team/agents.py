@@ -6,12 +6,13 @@ its own tools and instructions. The Team Leader in graph.py delegates to them.
 from dataclasses import dataclass
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import ModelRetryMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
 from ds_team import tools
-from ds_team.config import BASE_DIR, DEFAULT_DATASET
+from ds_team.config import BASE_DIR, DEFAULT_DATASET, is_retryable_model_error
 
 DATASET = DEFAULT_DATASET.relative_to(BASE_DIR).as_posix()
 
@@ -93,6 +94,8 @@ AGENT_SPECS = [
             "You may use numpy, pandas, scikit-learn, scipy, matplotlib and seaborn.",
             "Save code with `write_file`: the user reviews and approves it before it is saved. Then run it with `run_python_file`.",
             "Put reusable code in src/, read data from data/ and save models to models/.",
+            "The existing pipeline is src/data_cleaning.py -> src/preprocessing.py -> src/train.py "
+            "(trains models and reports MAE/RMSE/R² to reports/model_metrics.md). Reuse it before writing new code.",
             "If the user rejects your code, revise it using their feedback.",
             "If a package is missing, install it with `install_package`.",
             "Use `web_search` when you need the latest documentation of a library.",
@@ -112,14 +115,48 @@ AGENT_SPECS = [
 ]
 
 
-def build_agents(model: BaseChatModel) -> dict[str, CompiledStateGraph]:
+# tools that change the project or run code (removed when code execution is disabled)
+EXECUTION_TOOLS = {"write_file", "run_python_file", "install_package", "run_shell_command"}
+EXECUTION_DISABLED_NOTE = (
+    "Code execution is disabled in this deployment: you cannot save files or run code, "
+    "so show any code in your reply instead."
+)
+
+
+def enabled_specs(allow_code_execution: bool = True) -> list[AgentSpec]:
+    """The agents available in this deployment, with execution tools removed if needed."""
+    if allow_code_execution:
+        return AGENT_SPECS
+    specs = []
+    for spec in AGENT_SPECS:
+        safe_tools = [t for t in spec.tools if t.name not in EXECUTION_TOOLS]
+        if not any(t.name in EXECUTION_TOOLS for t in spec.tools):
+            specs.append(spec)
+        elif spec.name != "shell":  # the shell agent has nothing left to do
+            specs.append(AgentSpec(spec.name, spec.description, safe_tools, spec.instructions + [EXECUTION_DISABLED_NOTE]))
+    return specs
+
+
+def build_agents(model: BaseChatModel, specs: list[AgentSpec] = AGENT_SPECS) -> dict[str, CompiledStateGraph]:
     """Create one LangChain agent per spec, keyed by agent name."""
     return {
         spec.name: create_agent(
             model,
             tools=spec.tools,
             system_prompt="\n".join(f"- {line}" for line in spec.instructions + COMMON_INSTRUCTIONS),
+            middleware=[_retry_middleware()],
             name=spec.name,
         )
-        for spec in AGENT_SPECS
+        for spec in specs
     }
+
+
+def _retry_middleware() -> ModelRetryMiddleware:
+    """Retry malformed tool calls (Groq `tool_use_failed`) and rate limits. If it still fails,
+    the agent reports the error to the Team Leader instead of crashing the whole turn."""
+    return ModelRetryMiddleware(
+        max_retries=3,
+        retry_on=is_retryable_model_error,
+        on_failure=lambda error: f"I could not finish this task because the model kept failing: {error}",
+        initial_delay=2.0,
+    )

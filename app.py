@@ -1,49 +1,40 @@
 """Run the Data Science Team in the terminal or as a REST API.
 
-    python app.py                    # chat in the terminal
+    python app.py                    # chat in the terminal (live token streaming)
     python app.py --thread <id>      # continue an earlier terminal conversation
     python app.py --serve            # REST API on http://127.0.0.1:7777 (docs at /docs)
+
+For the web UI, run `streamlit run streamlit_app.py`.
 """
 import argparse
+import json
+import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import Iterator
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from langgraph.types import Command
 from pydantic import BaseModel
 
+from ds_team import config
 from ds_team.graph import build_graph, sqlite_checkpointer
+from ds_team.runner import pending_approvals, run_turn, stream_turn
 
 # the team, with conversation memory stored in memory.db
 graph = build_graph(checkpointer=sqlite_checkpointer())
 
 
-def _config(thread_id: str) -> dict:
-    return {"configurable": {"thread_id": thread_id}, "recursion_limit": 100}
-
-
-def run_turn(thread_id: str, graph_input, on_step: Callable[[str], None] | None = None) -> dict:
-    """Run the graph until it finishes or pauses for the user's approval."""
-    config = _config(thread_id)
-    for update in graph.stream(graph_input, config, stream_mode="updates"):
-        if on_step:
-            for node in update:
-                if node != "__interrupt__":
-                    on_step(node)
-
-    state = graph.get_state(config)
-    if state.interrupts:
-        return {
-            "thread_id": thread_id,
-            "status": "awaiting_approval",
-            "approvals": [{"id": i.id, **i.value} for i in state.interrupts],
-        }
-    return {"thread_id": thread_id, "status": "done", "reply": state.values["messages"][-1].text}
-
-
 def _user_message(text: str) -> dict:
     return {"messages": [{"role": "user", "content": text}]}
+
+
+def _result(thread_id: str, event: dict) -> dict:
+    """Turn the last event of a turn into the API response."""
+    if event["type"] == "approval":
+        return {"thread_id": thread_id, "status": "awaiting_approval", "approvals": event["approvals"]}
+    return {"thread_id": thread_id, "status": "done", "reply": event["reply"]}
 
 
 # ============================ REST API ==============================
@@ -64,36 +55,73 @@ class ApprovalRequest(BaseModel):
     answers: dict[str, str]  # approval id -> "yes", "no" or feedback for the agent
 
 
+def _chat_input(request: ChatRequest) -> tuple[str, dict]:
+    thread_id = request.thread_id or str(uuid.uuid4())
+    if pending_approvals(graph, thread_id):
+        raise HTTPException(409, "This thread is waiting for approval. Answer it with POST /approve first.")
+    return thread_id, _user_message(request.message)
+
+
+def _approval_input(request: ApprovalRequest) -> Command:
+    pending = pending_approvals(graph, request.thread_id)
+    if not pending:
+        raise HTTPException(409, "Nothing is waiting for approval in this thread.")
+    missing = [a["id"] for a in pending if a["id"] not in request.answers]
+    if missing:
+        raise HTTPException(400, f"Missing answers for approvals: {missing}")
+    return Command(resume=request.answers)
+
+
+def _sse(thread_id: str, graph_input) -> StreamingResponse:
+    """Stream the turn's events as Server-Sent Events."""
+    def events() -> Iterator[str]:
+        yield f"data: {json.dumps({'type': 'thread', 'thread_id': thread_id})}\n\n"
+        for event in stream_turn(graph, thread_id, graph_input):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "model": config.model_label(),
+        "code_execution": config.ALLOW_CODE_EXECUTION,
+        "langsmith_tracing": config.tracing_enabled(),
+    }
 
 
 @app.post("/chat")
 def chat(request: ChatRequest) -> dict:
     """Send a message. Returns the reply, or the actions waiting for approval."""
-    thread_id = request.thread_id or str(uuid.uuid4())
-    if graph.get_state(_config(thread_id)).interrupts:
-        raise HTTPException(409, "This thread is waiting for approval. Answer it with POST /approve first.")
-    return run_turn(thread_id, _user_message(request.message))
+    thread_id, graph_input = _chat_input(request)
+    return _result(thread_id, run_turn(graph, thread_id, graph_input))
+
+
+@app.post("/chat/stream")
+def chat_stream(request: ChatRequest) -> StreamingResponse:
+    """Like /chat, but streams tokens and agent activity as Server-Sent Events."""
+    thread_id, graph_input = _chat_input(request)
+    return _sse(thread_id, graph_input)
 
 
 @app.post("/approve")
 def approve(request: ApprovalRequest) -> dict:
     """Approve or reject the pending actions of a thread."""
-    pending = graph.get_state(_config(request.thread_id)).interrupts
-    if not pending:
-        raise HTTPException(409, "Nothing is waiting for approval in this thread.")
-    missing = [i.id for i in pending if i.id not in request.answers]
-    if missing:
-        raise HTTPException(400, f"Missing answers for approvals: {missing}")
-    return run_turn(request.thread_id, Command(resume=request.answers))
+    return _result(request.thread_id, run_turn(graph, request.thread_id, _approval_input(request)))
+
+
+@app.post("/approve/stream")
+def approve_stream(request: ApprovalRequest) -> StreamingResponse:
+    """Like /approve, but streams the rest of the turn as Server-Sent Events."""
+    return _sse(request.thread_id, _approval_input(request))
 
 
 @app.get("/threads/{thread_id}")
 def thread_history(thread_id: str) -> dict:
     """Conversation history and session notes of a thread."""
-    values = graph.get_state(_config(thread_id)).values
+    values = graph.get_state({"configurable": {"thread_id": thread_id}}).values
     return {
         "thread_id": thread_id,
         "notes": values.get("notes", {}),
@@ -111,10 +139,30 @@ def _show_approval(approval: dict) -> None:
         print(f"Package: {approval['package']}")
 
 
+def _print_turn(thread_id: str, graph_input) -> dict:
+    """Stream one turn to the terminal and return its last event."""
+    print("\nTeam Leader: ", end="", flush=True)
+    for event in stream_turn(graph, thread_id, graph_input):
+        match event["type"]:
+            case "token":
+                print(event["text"], end="", flush=True)
+            case "delegation":
+                print(f"\n  -> {event['agent']}: {event['task'][:100]}", flush=True)
+            case "tool":
+                print(f"     [{event['agent']}] {event['tool']}", flush=True)
+            case "agent_done":
+                print(f"  <- {event['agent']} done\nTeam Leader: ", end="", flush=True)
+    print()
+    return event
+
+
 def chat_in_terminal(thread_id: str | None = None) -> None:
+    # models often reply with characters the Windows console code page can't print
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     thread_id = thread_id or str(uuid.uuid4())
-    print(f"Data Science Team (thread {thread_id}). Type 'exit' to quit.")
-    on_step = lambda node: print(f"  -> {node} done")
+    tracing = f"LangSmith project '{config.LANGSMITH_PROJECT}'" if config.tracing_enabled() else "off"
+    print(f"Data Science Team | model {config.model_label()} | tracing {tracing}")
+    print(f"Thread {thread_id}. Type 'exit' to quit.")
 
     while True:
         message = input("\nYou: ").strip()
@@ -123,15 +171,13 @@ def chat_in_terminal(thread_id: str | None = None) -> None:
         if not message:
             continue
 
-        result = run_turn(thread_id, _user_message(message), on_step)
-        while result["status"] == "awaiting_approval":
+        event = _print_turn(thread_id, _user_message(message))
+        while event["type"] == "approval":
             answers = {}
-            for approval in result["approvals"]:
+            for approval in event["approvals"]:
                 _show_approval(approval)
                 answers[approval["id"]] = input("Approve? (yes / no / feedback): ").strip() or "no"
-            result = run_turn(thread_id, Command(resume=answers), on_step)
-
-        print(f"\nTeam Leader: {result['reply']}")
+            event = _print_turn(thread_id, Command(resume=answers))
 
 
 if __name__ == "__main__":

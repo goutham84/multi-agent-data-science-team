@@ -1,13 +1,20 @@
 # 🤖 Multi-Agent Data Science Team (LangChain + LangGraph)
 
-An AI-powered data science team where a **Team Leader agent** coordinates **six specialised agents** to take a dataset through the full ML workflow: loading, exploration, cleaning, visualisation, feature engineering and model building. You talk to it in plain English, and it plans the work and delegates each step to the right agent.
+An AI-powered data science team where a **Team Leader agent** coordinates **six specialised agents** to take a dataset through the full ML workflow: loading, exploration, cleaning, visualisation, feature engineering, model training and evaluation. You talk to it in plain English, and it plans the work and delegates each step to the right agent.
 
-Built with **LangChain** agents orchestrated by a **LangGraph** supervisor graph, with human-in-the-loop approvals, persistent SQLite memory and a FastAPI REST API.
+Built with **LangChain** agents orchestrated by a **LangGraph** supervisor graph. It also has:
+- live token streaming
+- human-in-the-loop approvals
+- persistent SQLite memory
+- **LangSmith** tracing
+- a **Streamlit** web app and a FastAPI REST API
 
+![Tests](https://github.com/goutham84/multi-agent-data-science-team/actions/workflows/tests.yml/badge.svg)
 ![Python](https://img.shields.io/badge/Python-3.13+-blue.svg)
 ![LangChain](https://img.shields.io/badge/LangChain-1.4-1C3C3C.svg)
 ![LangGraph](https://img.shields.io/badge/LangGraph-1.2-orange.svg)
-![FastAPI](https://img.shields.io/badge/FastAPI-REST%20API-009688.svg)
+![LangSmith](https://img.shields.io/badge/LangSmith-tracing-7F56D9.svg)
+![Streamlit](https://img.shields.io/badge/Streamlit-app-FF4B4B.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
 ---
@@ -47,6 +54,7 @@ How it works:
 3. Each specialist is a LangChain **`create_agent`** (ReAct loop) with its own tools. Its final answer returns to the Team Leader as the tool result.
 4. `remember` calls save facts (data paths, model paths, preferences) into the graph's **session notes**.
 5. A **SQLite checkpointer** saves the whole state per conversation thread, so the team remembers earlier sessions.
+6. Every run is **streamed** (Team Leader tokens + agent activity) and **traced in LangSmith**.
 
 ---
 
@@ -55,31 +63,19 @@ How it works:
 - **Supervisor multi-agent architecture** built as an explicit LangGraph `StateGraph`
 - **Six specialist agents**, each with only the tools it needs
 - **Parallel delegation** with LangGraph `Send`
+- **Live streaming**: the Team Leader's tokens and each agent's tool calls appear as they happen, in the terminal, the API (Server-Sent Events) and the Streamlit app
 - **Human-in-the-loop approvals**: writing a file or installing a package pauses the graph with `interrupt()` until you approve, reject, or reply with feedback
+- **Safe mode for public deployments** (`ALLOW_CODE_EXECUTION=false`): agents can explore and plot data but cannot write, run or install anything
 - **Sandboxed tools**: file access is limited to the project folder, and shell commands are limited to an allow-list
+- **LangSmith tracing**: every agent, tool and LLM call is traced, grouped by conversation thread
 - **Persistent memory**: conversations and session notes are stored in SQLite (`memory.db`)
-- **Swappable LLM**: any provider supported by `init_chat_model`, set in `.env` (OpenAI `gpt-5-mini` by default, Groq Llama 3.3 as an option)
-- **Three ways to use it**: terminal chat, REST API, or the LangGraph Studio UI
-- **Tested without API keys**: pytest suite with a scripted fake model
+- **Groq or OpenAI, chosen in `.env`**: `LLM_PROVIDER=groq|openai` + `LLM_MODEL`. The default is Groq `openai/gpt-oss-120b`, with retries for Groq's rate limits and malformed tool calls
+- **Model training pipeline** with MAE / RMSE / R² evaluation
+- **Tested offline**: 34 pytest tests, including the Streamlit UI and Groq request payloads, run in GitHub Actions on every push
 
 ---
 
 ## 🏗️ Agents
-
-### Agent Hierarchy
-
-```
-User
-  └── Team Leader (Project Manager)
-       ├── Data Loader Agent         (CSV expert)
-       ├── File Manager Agent        (file system)
-       ├── Data Understanding Agent  (pandas / EDA)
-       ├── Visualization Agent       (matplotlib charts)
-       ├── Coding Agent              (ML engineer)
-       └── Shell Agent               (runs scripts)
-```
-
-### Agent Responsibilities
 
 | Agent | Role | What it does | Tools |
 |-------|------|--------------|-------|
@@ -88,10 +84,10 @@ User
 | **File Manager** | File System Manager | Lists, reads and writes project files | `list_files`, `read_file`, `write_file`* |
 | **Data Understanding** | EDA Assistant | Shape, dtypes, describe, value counts, missing values, duplicates, correlations | `list_csv_files`, `dataframe_operation` |
 | **Visualization** | Plotting Assistant | Bar, histogram, scatter, line, pie and box charts saved to `plots/` | `list_csv_files`, `dataframe_operation`, `create_chart` |
-| **Coding** | ML Engineer | Writes and runs Python for cleaning, feature engineering, training and evaluation | `read_file`, `write_file`*, `run_python_file`, `install_package`*, `web_search` |
-| **Shell** | Command Executor | Runs `uv run <file.py>` and read-only commands | `run_shell_command` (allow-listed), `list_files` |
+| **Coding** | ML Engineer | Writes and runs Python for cleaning, feature engineering, training and evaluation | `read_file`, `write_file`*, `run_python_file`†, `install_package`*, `web_search` |
+| **Shell** | Command Executor | Runs `uv run <file.py>` and read-only commands | `run_shell_command`† (allow-listed), `list_files` |
 
-\* needs your approval before it runs.
+\* needs your approval · † disabled in safe mode (the Shell agent is removed entirely)
 
 ### Example flow
 
@@ -110,7 +106,7 @@ sequenceDiagram
     end
     DataUnderstanding-->>TeamLeader: Shape, dtypes, duplicates
     Visualization-->>TeamLeader: plots/histogram_selling_price.png
-    TeamLeader-->>User: Findings + suggested next step
+    TeamLeader-->>User: Findings + suggested next step (streamed)
     User->>TeamLeader: "Write a cleaning script"
     TeamLeader->>Coding: Write src/clean.py
     Coding-->>User: interrupt: approve this code?
@@ -121,43 +117,67 @@ sequenceDiagram
 
 ---
 
+## 📊 Dataset & Model Results
+
+The demo uses a used-car listings dataset (`data/car_details.csv`, 4,340 rows) with these columns:
+`name`, `year`, `selling_price`, `km_driven`, `fuel`, `seller_type`, `transmission`, `owner`.
+
+**Pipeline:** `src/data_cleaning.py` → `src/preprocessing.py` → `src/train.py`
+
+1. **Cleaning** removes 763 exact duplicates and 63 extreme outliers (0.5th–99.5th percentile), and adds `brand`, `model` and `age`.
+2. **Preprocessing** scales the numerical columns, one-hot encodes the categorical columns and makes an 80/20 train/test split.
+3. **Training** fits three regressors on `log1p(selling_price)` (the price is right-skewed) and keeps the best one by test RMSE.
+
+Test set (703 cars):
+
+| Model | MAE (₹) | RMSE (₹) | R² |
+|---|---:|---:|---:|
+| **Ridge (best)** | 120,353 | 189,503 | **0.748** |
+| HistGradientBoosting | 120,230 | 199,168 | 0.722 |
+| RandomForest | 123,793 | 207,495 | 0.698 |
+
+Training on the log target improved R² from 0.706 to 0.748 compared with the raw price. See [reports/model_metrics.md](reports/model_metrics.md).
+
+---
+
 ## 📁 Project Structure
 
 ```
 multi-agent-data-science-team/
 │
-├── app.py                     # Terminal chat + FastAPI REST API (entry point)
+├── streamlit_app.py           # Streamlit web app (deployable)
+├── app.py                     # Terminal chat + FastAPI REST API
 ├── langgraph.json             # LangGraph Studio config
 │
 ├── ds_team/                   # The multi-agent system
-│   ├── config.py              # Paths and LLM setup (MODEL from .env)
-│   ├── tools.py               # Sandboxed LangChain tools (CSV, pandas, charts, files, Python, shell, search)
+│   ├── config.py              # Paths, LLM, safe mode and LangSmith settings
+│   ├── tools.py               # Sandboxed tools (CSV, pandas, charts, files, Python, shell, search)
 │   ├── agents.py              # The six specialist agents (create_agent)
 │   ├── graph.py               # LangGraph supervisor graph + SQLite checkpointer
+│   ├── runner.py              # Streams a turn as events (tokens, delegations, tools, approvals)
 │   └── studio.py              # Graph entry point for `langgraph dev`
 │
-├── tests/                     # pytest suite (scripted model, no API key needed)
-│
-├── src/                       # Reusable ML pipeline scripts
+├── src/                       # ML pipeline
 │   ├── data_cleaning.py       # Duplicates, outliers, brand/model extraction, car age
 │   ├── data_plotting.py       # Before/after selling-price histograms
-│   └── preprocessing.py       # Train/test split, scaling + one-hot encoding
+│   ├── preprocessing.py       # Train/test split, scaling + one-hot encoding
+│   └── train.py               # Trains and evaluates models (MAE / RMSE / R²)
+│
+├── tests/                     # 34 pytest tests (scripted model + fake Groq client, no API key needed)
+├── .github/workflows/         # CI: runs the tests on every push
+├── .streamlit/                # Streamlit config + secrets template
+│
+├── data/                      # car_details.csv (raw), cleaned data, features/, uploads/
+├── models/                    # preprocessor.joblib, model.joblib
+├── plots/                     # Charts created by the agents
+├── reports/                   # EDA reports, cleaning log, model metrics
 ├── clean_car_data.py          # Standalone cleaning script
 ├── run_car_report.py          # Markdown EDA report for the dataset
 │
-├── data/
-│   ├── car_details.csv        # Raw dataset (4,340 used-car listings)
-│   ├── car_data_cleaned.csv   # Output of clean_car_data.py
-│   ├── data_cleaned.csv       # Output of src/data_cleaning.py
-│   ├── sample_cars.csv        # 20-row sample (used by the tests)
-│   └── features/              # Processed train.csv / test.csv
-├── models/                    # preprocessor.joblib
-├── plots/                     # Charts created by the agents
-├── reports/                   # EDA reports and cleaning logs
-│
-├── .env.example               # Template for API keys and model choice
+├── .env.example               # Template for API keys and settings
 ├── pyproject.toml / uv.lock   # Dependencies (uv)
-├── requirements.txt           # Dependencies for pip users
+├── requirements.txt           # Runtime dependencies for pip users
+├── requirements-dev.txt       # + pytest and LangGraph Studio
 └── LICENSE
 ```
 
@@ -169,138 +189,221 @@ multi-agent-data-science-team/
 
 - **Python 3.13+**
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- An **OpenAI API key** (or a Groq API key)
+- A free **Groq API key** from [console.groq.com/keys](https://console.groq.com/keys) (or an OpenAI key)
+- Optional: a free [LangSmith](https://smith.langchain.com) API key for tracing
 
 ### Installation
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/goutham84/multi-agent-data-science-team.git
-   cd multi-agent-data-science-team
-   ```
+```bash
+git clone https://github.com/goutham84/multi-agent-data-science-team.git
+cd multi-agent-data-science-team
 
-2. **Install dependencies**
+uv sync                                  # or: pip install -r requirements-dev.txt
 
-   With uv (recommended):
-   ```bash
-   uv sync
-   ```
+cp .env.example .env                     # then paste your API keys into .env
+```
 
-   Or with pip:
-   ```bash
-   python -m venv .venv
-   # Windows
-   .venv\Scripts\activate
-   # Linux / macOS
-   source .venv/bin/activate
-
-   pip install -r requirements.txt
-   ```
-
-3. **Add your API key**
-   ```bash
-   cp .env.example .env
-   # then open .env and paste your OPENAI_API_KEY
-   ```
-
-### Option 1: Chat in the terminal
+### Option 1: Streamlit web app
 
 ```bash
-uv run app.py
+uv run streamlit run streamlit_app.py
+```
+
+Open `http://localhost:8501`. In the app you can:
+- chat with the team and watch each agent's work live in a status panel
+- upload your own CSV
+- see generated charts inline
+- approve or reject code in a form
+
+### Option 2: Terminal chat
+
+```bash
+uv run app.py                    # new conversation
+uv run app.py --thread <id>      # continue an earlier one
 ```
 
 ```text
-Data Science Team (thread 3f2c...). Type 'exit' to quit.
+Data Science Team | model groq / openai/gpt-oss-120b | tracing LangSmith project 'Multi_agent_datascience_team'
 
-You: Load car_details.csv and tell me about the data
-  -> data_loader done
-  -> data_understanding done
-  -> team_leader done
+You: Explore car_details.csv and plot the price distribution
 
-Team Leader: The dataset has 4,340 rows and 8 columns...
+Team Leader: I'll get the data summary and the chart in parallel.
+  -> data_understanding: Summarise data/car_details.csv: shape, dtypes, missing values...
+  -> visualization: Create a histogram of selling_price from data/car_details.csv
+     [data_understanding] dataframe_operation
+     [visualization] create_chart
+  <- data_understanding done
+  <- visualization done
+Team Leader: The dataset has 4,340 rows... (streamed token by token)
 ```
 
 When an agent wants to write a file, you see the code and answer `yes`, `no`, or type feedback such as `use pathlib instead`. The agent then revises its code.
-To continue an earlier conversation, run `uv run app.py --thread <thread-id>`.
 
-### Option 2: REST API
+### Option 3: REST API
 
 ```bash
-uv run app.py --serve
+uv run app.py --serve            # http://127.0.0.1:7777/docs
 ```
-
-Interactive docs: `http://127.0.0.1:7777/docs`
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
 | `POST` | `/chat` | `{"message": "...", "thread_id": "optional"}` → reply, or pending approvals |
+| `POST` | `/chat/stream` | Same, streamed as Server-Sent Events (tokens, delegations, tool calls) |
 | `POST` | `/approve` | `{"thread_id": "...", "answers": {"<approval id>": "yes"}}` → resume the graph |
+| `POST` | `/approve/stream` | Same, streamed as Server-Sent Events |
 | `GET` | `/threads/{thread_id}` | Conversation history and session notes |
-| `GET` | `/health` | Health check |
+| `GET` | `/health` | Model, safe mode and tracing status |
 
-### Option 3: LangGraph Studio (visual UI)
+```bash
+curl -N -X POST http://127.0.0.1:7777/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "How many rows does car_details.csv have?"}'
+```
+
+### Option 4: LangGraph Studio
 
 ```bash
 uv run langgraph dev
 ```
 
-This opens LangGraph Studio, where you can chat with the team, watch each node run, inspect the state and approve interrupts in the browser. It requires a free LangSmith account.
+This opens LangGraph Studio, where you can chat with the team, step through each node, inspect the state and approve interrupts.
 
----
-
-## 💡 Example Prompts
-
-```text
-List all the CSV files in the data folder.
-Load car_details.csv and show me the first 10 rows.
-What are the numerical and categorical columns? Show value counts for fuel and transmission.
-Plot a histogram of selling_price and a pie chart of seller_type.
-Remember that the cleaned data is in data/data_cleaned.csv.
-Write a script that removes duplicates and outliers in selling_price and km_driven.
-Train a RandomForest on data/features/train.csv and evaluate it on test.csv.
-```
-
-### Run the pipeline scripts directly
+### Run the ML pipeline directly
 
 ```bash
 uv run run_car_report.py        # EDA report  -> reports/car_data_report.md
 uv run src/data_cleaning.py     # Cleaning    -> data/data_cleaned.csv
 uv run src/data_plotting.py     # Plots       -> plots/
 uv run src/preprocessing.py     # Features    -> data/features/, models/preprocessor.joblib
+uv run src/train.py             # Training    -> models/model.joblib, reports/model_metrics.md
 ```
+
+---
+
+## ⚡ Choosing the LLM: Groq or OpenAI
+
+Pick the provider and model in `.env`. No code changes are needed:
+
+```env
+# Groq (default)
+LLM_PROVIDER=groq
+LLM_MODEL=openai/gpt-oss-120b
+LLM_REASONING_EFFORT=low
+GROQ_API_KEY=gsk_...
+
+# OpenAI
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-5-mini
+OPENAI_API_KEY=sk-...
+```
+
+| Provider | Model | Notes |
+|----------|-------|-------|
+| Groq | `openai/gpt-oss-120b` **(default)** | Best tool use and reasoning. Delegates to one agent at a time |
+| Groq | `openai/gpt-oss-20b` | Faster and lighter |
+| Groq | `qwen/qwen3.8-27b` | Preview model. Supports parallel tool calls |
+| OpenAI | `gpt-5-mini` (default for OpenAI) | Any chat model with tool calling works, e.g. `gpt-5`, `gpt-4.1-mini` |
+
+Which Groq models your key can use varies by account. Check [console.groq.com/docs/models](https://console.groq.com/docs/models). If you get `model_not_found`, pick another model from the list.
+
+**`LLM_REASONING_EFFORT=low` makes a big difference on Groq.** The same request (plot fuel types + find the most common one, delegated to two agents) measured in LangSmith:
+
+| Reasoning effort | Time | Tokens |
+|------------------|-----:|-------:|
+| default (medium) | 62.7 s | 14,681 |
+| **low** | **4.9 s** | **5,947** |
+
+Both runs gave the same correct answer. At medium effort the turn went over Groq's per-minute token limit and spent most of its time waiting.
+
+How the project handles Groq's limits:
+- **Rate limits (429):** the client retries with backoff (`MAX_RETRIES=6`) and honours Groq's `retry-after`, so a turn may slow down but won't fail.
+- **`tool_use_failed`:** open models sometimes produce a malformed tool call, which Groq rejects. The Team Leader and every agent retry the call (agents use LangChain's `ModelRetryMiddleware`). If it still fails, the agent reports the error instead of crashing the turn.
+- **Reliable tool calls:** the temperature defaults to `0.3` on Groq.
+- **Key name:** must be exactly `GROQ_API_KEY`. Linux (Streamlit Cloud, CI) is case-sensitive.
+
+---
+
+## 🔍 LangSmith Tracing
+
+Set these in `.env` (or in Streamlit secrets when deployed):
+
+```env
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=your_langsmith_api_key_here
+LANGSMITH_PROJECT=Multi_agent_datascience_team
+```
+
+LangChain and LangGraph then trace every run automatically. In LangSmith you see:
+- the whole graph, with each delegation and each agent's ReAct loop nested inside it
+- every tool call and LLM call, with latency and token usage
+- **Threads view**: runs grouped by conversation, because each run carries its `thread_id` as metadata
+- tags (`multi-agent-data-science-team`) and the model name, for filtering
+
+If `LANGSMITH_API_KEY` is missing, tracing is switched off automatically, so the app still runs.
+
+---
+
+## ☁️ Deploy on Streamlit Community Cloud
+
+1. Push this repo to GitHub (already done if you're reading this there).
+2. Go to [share.streamlit.io](https://share.streamlit.io) → **Create app** → choose this repository, branch `main`, main file `streamlit_app.py`.
+3. Under **Advanced settings**, select **Python 3.13** and paste your secrets (template in [.streamlit/secrets.toml.example](.streamlit/secrets.toml.example)):
+
+   ```toml
+   LLM_PROVIDER = "groq"
+   LLM_MODEL = "openai/gpt-oss-120b"
+   LLM_REASONING_EFFORT = "low"
+   GROQ_API_KEY = "gsk_..."
+   ALLOW_CODE_EXECUTION = "false"     # safe mode for a public app
+   APP_PASSWORD = "choose-a-password" # optional: protects your API credits
+   LANGSMITH_TRACING = "true"
+   LANGSMITH_API_KEY = "lsv2_pt_..."
+   LANGSMITH_PROJECT = "Multi_agent_datascience_team"
+   ```
+
+4. Click **Deploy**. Dependencies are installed from `uv.lock`.
+
+> ⚠️ **Keep `ALLOW_CODE_EXECUTION = "false"` on public deployments.** With it on, anyone who opens the app could approve code that runs on the server. If you leave out `GROQ_API_KEY`, visitors can paste their own key in the sidebar instead (it's only kept for their session).
 
 ---
 
 ## 🔧 Configuration
 
-All settings live in `.env`:
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `LLM_PROVIDER` | `groq` | `groq` or `openai` |
+| `LLM_MODEL` | `openai/gpt-oss-120b` (Groq) / `gpt-5-mini` (OpenAI) | Model id on that provider |
+| `LLM_REASONING_EFFORT` | provider default | `low` / `medium` / `high` for reasoning models (gpt-oss, gpt-5). `low` is much faster |
+| `LLM_TEMPERATURE` | `0.3` on Groq, unset on OpenAI | gpt-5 models only accept their default |
+| `GROQ_API_KEY` / `OPENAI_API_KEY` | — | Key for the chosen provider (names are case-sensitive on Linux) |
+| `MAX_RETRIES` | `6` | Retries with backoff on rate limits (429) |
+| `ALLOW_CODE_EXECUTION` | `true` | `false` = safe mode: no file writes, code runs or installs |
+| `APP_PASSWORD` | — | Optional password for the Streamlit app |
+| `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT` | — | LangSmith tracing |
 
-```env
-MODEL=openai:gpt-5-mini                # or groq:llama-3.3-70b-versatile
-OPENAI_API_KEY=your_openai_api_key_here
-GROQ_API_KEY=your_groq_api_key_here    # only if you use Groq
-
-# Optional: trace every agent step in LangSmith
-LANGSMITH_TRACING=true
-LANGSMITH_API_KEY=your_langsmith_api_key_here
-```
-
-> ⚠️ **Security note:** the Coding Agent can run Python files from the project. Every file write and package install needs your approval, and shell commands are allow-listed, but approved code still runs on your machine. Only approve code you have read, and keep the API bound to `127.0.0.1`.
+> ⚠️ **Security note:** with code execution on, the Coding Agent can run Python files from the project. Every file write and package install needs your approval, and shell commands are allow-listed, but approved code still runs on your machine. Only approve code you have read.
 
 ---
 
-## 🧪 Tests
+## 🧪 Tests & CI
 
 ```bash
 uv run pytest
 ```
 
-The tests use a scripted fake chat model, so they run offline with no API key. They cover:
+There are 34 tests. They use a scripted fake chat model (which also streams) and a fake Groq client, so they run offline with no API key. They cover:
 - delegation and session notes
 - parallel delegation
-- the approve and reject flow for file writes
-- sandboxing of file paths, shell commands and package names
-- every data tool
+- the approve and reject flow
+- streaming events
+- tool sandboxing
+- model training
+- **LLM configuration**: both providers, default models, overrides and invalid values
+- **Groq compatibility**: the real `ChatGroq` class with a fake HTTP client checks the message and tool payloads, streaming, and the `tool_use_failed` retry
+- the **Streamlit app itself**, via Streamlit's `AppTest`: chat, approval form and safe mode
+
+[GitHub Actions](.github/workflows/tests.yml) runs the suite on every push and pull request.
 
 ---
 
@@ -309,35 +412,24 @@ The tests use a scripted fake chat model, so they run offline with no API key. T
 | Area | Tools |
 |------|-------|
 | Agents | LangChain 1.x (`create_agent`, tools, `init_chat_model`) |
-| Orchestration | LangGraph 1.x (`StateGraph`, `Send`, `interrupt`, checkpointers) |
-| LLMs | OpenAI GPT-5-mini, Groq Llama 3.3 70B |
+| Orchestration | LangGraph 1.x (`StateGraph`, `Send`, `interrupt`, streaming, checkpointers) |
+| Observability | LangSmith tracing |
+| LLMs | Groq (`openai/gpt-oss-120b`, `gpt-oss-20b`, `qwen3.8-27b`), OpenAI (optional) |
 | Memory | SQLite checkpointer (`langgraph-checkpoint-sqlite`) |
-| API | FastAPI, Uvicorn |
-| Data processing | pandas, NumPy |
-| Visualisation | Matplotlib, Seaborn |
-| Machine learning | scikit-learn, joblib |
+| Interfaces | Streamlit, FastAPI (REST + SSE), terminal, LangGraph Studio |
+| Data & ML | pandas, NumPy, scikit-learn, Matplotlib, Seaborn |
 | Web search | DuckDuckGo (`ddgs`) |
-| Tooling | uv, pytest, LangGraph Studio |
-
----
-
-## 📊 Dataset
-
-The demo uses a used-car listings dataset (`data/car_details.csv`, 4,340 rows) with these columns:
-`name`, `year`, `selling_price`, `km_driven`, `fuel`, `seller_type`, `transmission`, `owner`.
-
-The cleaning step removes 763 exact duplicates and 63 extreme outliers (0.5th–99.5th percentile), and adds `brand`, `model` and `age`. See [reports/cleaning_log_data_cleaned.md](reports/cleaning_log_data_cleaned.md).
+| Tooling | uv, pytest, GitHub Actions |
 
 ---
 
 ## 📈 Roadmap
 
-- [ ] Model training & evaluation script (`src/train.py`) with MAE / RMSE / R² metrics
-- [ ] Stream the agents' tokens to the terminal and API (`stream_mode="messages"`)
+- [ ] Hyperparameter tuning and cross-validation in `src/train.py`
 - [ ] Long-term memory across threads with a LangGraph `Store`
-- [ ] Run the Coding Agent's code in a Docker sandbox
+- [ ] Run the Coding Agent's code in a Docker sandbox so code execution can be enabled publicly
+- [ ] LangSmith evaluations: a dataset of questions with expected answers
 - [ ] Support more data formats (Excel, JSON, Parquet)
-- [ ] GitHub Actions CI running the test suite
 
 ---
 
@@ -371,7 +463,8 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ## 🙏 Acknowledgments
 
-- [LangChain](https://github.com/langchain-ai/langchain) and [LangGraph](https://github.com/langchain-ai/langgraph) for the agent and orchestration frameworks
+- [LangChain](https://github.com/langchain-ai/langchain), [LangGraph](https://github.com/langchain-ai/langgraph) and [LangSmith](https://smith.langchain.com) for the agent, orchestration and observability tools
+- [Streamlit](https://streamlit.io) for the web app framework
 - The open-source Python data science community
 
 ---
