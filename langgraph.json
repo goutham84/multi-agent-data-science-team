@@ -1,0 +1,8 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "data_science_team": "./ds_team/studio.py:graph"
+  },
+  "env": ".env",
+  "python_version": "3.13"
+}
