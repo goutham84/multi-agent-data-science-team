@@ -68,3 +68,35 @@ def test_unknown_provider_is_a_clear_error(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "anthropic")
     with pytest.raises(ValueError, match="LLM_PROVIDER must be one of"):
         config.get_model()
+
+
+def test_arguments_override_the_environment(monkeypatch):
+    """The Streamlit sidebar passes the visitor's choices, which beat the .env defaults."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("LLM_MODEL", "qwen/qwen3.8-27b")
+    model = config.get_model(api_key="sk-visitor", provider_name="openai", model="gpt-5", reasoning_effort="high")
+    assert isinstance(model, ChatOpenAI)
+    assert model.model_name == "gpt-5"
+    assert model.reasoning_effort == "high"
+    assert model.openai_api_key.get_secret_value() == "sk-visitor"
+
+
+def test_llm_model_only_applies_to_its_own_provider(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("LLM_MODEL", "qwen/qwen3.8-27b")
+    assert config.model_name("groq") == "qwen/qwen3.8-27b"
+    assert config.model_name("openai") == "gpt-5-mini"  # not the Groq model id
+
+
+@pytest.mark.parametrize("provider, model, supported", [
+    ("groq", "openai/gpt-oss-120b", True),
+    ("groq", "qwen/qwen3.8-27b", True),
+    ("groq", "llama-3.3-70b-versatile", False),
+    ("openai", "gpt-5-mini", True),
+    ("openai", "gpt-4.1-mini", False),
+])
+def test_reasoning_effort_is_only_sent_to_models_that_accept_it(monkeypatch, provider, model, supported):
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "low")
+    assert config.supports_reasoning_effort(provider, model) is supported
+    chat_model = config.get_model(provider_name=provider, model=model)
+    assert chat_model.reasoning_effort == ("low" if supported else None)
