@@ -6,12 +6,13 @@ its own tools and instructions. The Team Leader in graph.py delegates to them.
 from dataclasses import dataclass
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import ModelRetryMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph.state import CompiledStateGraph
 
 from ds_team import tools
-from ds_team.config import BASE_DIR, DEFAULT_DATASET
+from ds_team.config import BASE_DIR, DEFAULT_DATASET, is_retryable_model_error
 
 DATASET = DEFAULT_DATASET.relative_to(BASE_DIR).as_posix()
 
@@ -143,7 +144,19 @@ def build_agents(model: BaseChatModel, specs: list[AgentSpec] = AGENT_SPECS) -> 
             model,
             tools=spec.tools,
             system_prompt="\n".join(f"- {line}" for line in spec.instructions + COMMON_INSTRUCTIONS),
+            middleware=[_retry_middleware()],
             name=spec.name,
         )
         for spec in specs
     }
+
+
+def _retry_middleware() -> ModelRetryMiddleware:
+    """Retry malformed tool calls (Groq `tool_use_failed`) and rate limits. If it still fails,
+    the agent reports the error to the Team Leader instead of crashing the whole turn."""
+    return ModelRetryMiddleware(
+        max_retries=3,
+        retry_on=is_retryable_model_error,
+        on_failure=lambda error: f"I could not finish this task because the model kept failing: {error}",
+        initial_delay=2.0,
+    )

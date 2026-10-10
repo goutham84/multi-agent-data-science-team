@@ -26,8 +26,17 @@ def _env_flag(name: str, default: bool) -> bool:
     return default if value is None else value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-# "provider:model", e.g. "openai:gpt-5-mini" or "groq:llama-3.3-70b-versatile"
-MODEL = os.getenv("MODEL", "openai:gpt-5-mini")
+# "provider:model", e.g. "groq:openai/gpt-oss-120b", "groq:qwen/qwen3.8-27b" or "openai:gpt-5-mini".
+# Check which models your Groq key can use at https://console.groq.com/docs/models
+MODEL = os.getenv("MODEL", "groq:openai/gpt-oss-120b")
+
+# Retries with backoff for rate limits (429). Groq's per-minute token limits are low and a
+# multi-agent turn makes many model calls, so retry generously; the SDK honours retry-after.
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "6"))
+
+# Lower temperature makes open models produce well-formed tool calls more reliably.
+# Not sent to OpenAI's gpt-5 models, which only accept their default temperature.
+GROQ_TEMPERATURE = float(os.getenv("GROQ_TEMPERATURE", "0.3"))
 
 # Let agents write files, run Python and install packages. Turn this off for public
 # deployments: anyone who can open the app could otherwise approve code on your server.
@@ -47,14 +56,32 @@ if _env_flag("LANGSMITH_TRACING", False) and not os.getenv("LANGSMITH_API_KEY"):
     os.environ["LANGSMITH_TRACING"] = "false"
 
 
+def provider() -> str:
+    """The configured provider, e.g. "groq" or "openai"."""
+    return os.getenv("MODEL", MODEL).split(":", 1)[0].lower()
+
+
 def api_key_name() -> str:
-    """Environment variable holding the key for the configured provider, e.g. OPENAI_API_KEY."""
-    provider = os.getenv("MODEL", MODEL).split(":", 1)[0]
-    return f"{provider.upper()}_API_KEY"
+    """Environment variable holding the key for the configured provider, e.g. GROQ_API_KEY."""
+    return f"{provider().upper()}_API_KEY"
 
 
 def get_model(api_key: str | None = None) -> BaseChatModel:
     """Create the chat model configured in .env (MODEL=provider:model).
     `api_key` overrides the key from the environment (used by the Streamlit app)."""
-    kwargs = {"api_key": api_key} if api_key else {}
+    kwargs = {"max_retries": MAX_RETRIES}
+    if api_key:
+        kwargs["api_key"] = api_key
+    if provider() == "groq":
+        kwargs["temperature"] = GROQ_TEMPERATURE
     return init_chat_model(os.getenv("MODEL", MODEL), **kwargs)
+
+
+def is_retryable_model_error(error: Exception) -> bool:
+    """Errors worth retrying the model call for:
+    - Groq `tool_use_failed`: the model produced a malformed tool call (a retry usually fixes it)
+    - rate limits, timeouts and server errors still failing after the SDK's own retries
+    """
+    if type(error).__name__ == "BadRequestError":
+        return "tool_use_failed" in str(error)
+    return type(error).__name__ in {"RateLimitError", "APITimeoutError", "APIConnectionError", "InternalServerError"}

@@ -8,6 +8,7 @@ For the web UI, run `streamlit run streamlit_app.py`.
 """
 import argparse
 import json
+import sys
 import uuid
 from collections.abc import Iterator
 
@@ -156,6 +157,8 @@ def _print_turn(thread_id: str, graph_input) -> dict:
 
 
 def chat_in_terminal(thread_id: str | None = None) -> None:
+    # models often reply with characters the Windows console code page can't print
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     thread_id = thread_id or str(uuid.uuid4())
     tracing = f"LangSmith project '{config.LANGSMITH_PROJECT}'" if config.tracing_enabled() else "off"
     print(f"Data Science Team | model {config.MODEL} | tracing {tracing}")

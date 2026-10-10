@@ -1,7 +1,12 @@
 """Shared fixtures: a temporary project folder and a scripted chat model (no API key needed)."""
 import json
+import os
 import shutil
 import uuid
+
+# never send test runs to LangSmith, even if .env turns tracing on
+# (set before ds_team.config runs load_dotenv, which doesn't override existing variables)
+os.environ["LANGSMITH_TRACING"] = "false"
 
 import pytest
 from langchain_core.language_models import BaseChatModel

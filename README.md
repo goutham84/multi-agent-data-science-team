@@ -69,9 +69,9 @@ How it works:
 - **Sandboxed tools**: file access is limited to the project folder, and shell commands are limited to an allow-list
 - **LangSmith tracing**: every agent, tool and LLM call is traced, grouped by conversation thread
 - **Persistent memory**: conversations and session notes are stored in SQLite (`memory.db`)
-- **Swappable LLM**: set `MODEL=provider:model` in `.env` (OpenAI `gpt-5-mini` by default, Groq Llama 3.3 as an option)
+- **Runs on Groq** (`openai/gpt-oss-120b` by default) with retries for Groq's rate limits and malformed tool calls; any other `init_chat_model` provider (e.g. OpenAI) works by changing `MODEL`
 - **Model training pipeline** with MAE / RMSE / R² evaluation
-- **Tested offline**: 22 pytest tests, including the Streamlit UI, run in GitHub Actions on every push
+- **Tested offline**: 28 pytest tests, including the Streamlit UI and Groq request payloads, run in GitHub Actions on every push
 
 ---
 
@@ -163,7 +163,7 @@ multi-agent-data-science-team/
 │   ├── preprocessing.py       # Train/test split, scaling + one-hot encoding
 │   └── train.py               # Trains and evaluates models (MAE / RMSE / R²)
 │
-├── tests/                     # 22 pytest tests (scripted model, no API key needed)
+├── tests/                     # 28 pytest tests (scripted model + fake Groq client, no API key needed)
 ├── .github/workflows/         # CI: runs the tests on every push
 ├── .streamlit/                # Streamlit config + secrets template
 │
@@ -189,7 +189,7 @@ multi-agent-data-science-team/
 
 - **Python 3.13+**
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- An **OpenAI API key** (or a Groq API key)
+- A free **Groq API key** from [console.groq.com/keys](https://console.groq.com/keys) (or an OpenAI key)
 - Optional: a free [LangSmith](https://smith.langchain.com) API key for tracing
 
 ### Installation
@@ -223,7 +223,7 @@ uv run app.py --thread <id>      # continue an earlier one
 ```
 
 ```text
-Data Science Team | model openai:gpt-5-mini | tracing LangSmith project 'Multi_agent_datascience_team'
+Data Science Team | model groq:openai/gpt-oss-120b | tracing LangSmith project 'Multi_agent_datascience_team'
 
 You: Explore car_details.csv and plot the price distribution
 
@@ -280,6 +280,31 @@ uv run src/train.py             # Training    -> models/model.joblib, reports/mo
 
 ---
 
+## ⚡ Using Groq
+
+Groq is the default provider. Create a free key at [console.groq.com/keys](https://console.groq.com/keys) and set it in `.env`:
+
+```env
+MODEL=groq:openai/gpt-oss-120b
+GROQ_API_KEY=gsk_...
+```
+
+| Model | Notes |
+|-------|-------|
+| `openai/gpt-oss-120b` (default) | Strongest tool use. Delegates to one agent at a time (no parallel tool calls) |
+| `openai/gpt-oss-20b` | Faster and lighter |
+| `qwen/qwen3.8-27b` | Preview model. Supports parallel tool calls |
+
+Which models your key can use varies by account. Check [console.groq.com/docs/models](https://console.groq.com/docs/models). If you get `model_not_found`, pick another model from the list.
+
+How the project handles Groq's limits:
+- **Rate limits (429):** a multi-agent turn makes many model calls (about 10–15K tokens), and the free tier allows only a few thousand tokens per minute. The client retries with backoff (`MAX_RETRIES=6`) and honours Groq's `retry-after`, so a turn may slow down but won't fail.
+- **`tool_use_failed`:** open models sometimes produce a malformed tool call, which Groq rejects. The Team Leader and every agent retry the call (agents use LangChain's `ModelRetryMiddleware`). If it still fails, the agent reports the error instead of crashing the turn.
+- **Reliable tool calls:** the temperature is lowered to `0.3`.
+- **Key name:** must be exactly `GROQ_API_KEY`. Linux (Streamlit Cloud, CI) is case-sensitive, so `Groq_API_KEY` only works on Windows.
+
+---
+
 ## 🔍 LangSmith Tracing
 
 Set these in `.env` (or in Streamlit secrets when deployed):
@@ -308,8 +333,8 @@ If `LANGSMITH_API_KEY` is missing, tracing is switched off automatically, so the
 3. Under **Advanced settings**, select **Python 3.13** and paste your secrets (template in [.streamlit/secrets.toml.example](.streamlit/secrets.toml.example)):
 
    ```toml
-   MODEL = "openai:gpt-5-mini"
-   OPENAI_API_KEY = "sk-..."
+   MODEL = "groq:openai/gpt-oss-120b"
+   GROQ_API_KEY = "gsk_..."
    ALLOW_CODE_EXECUTION = "false"     # safe mode for a public app
    APP_PASSWORD = "choose-a-password" # optional: protects your API credits
    LANGSMITH_TRACING = "true"
@@ -319,7 +344,7 @@ If `LANGSMITH_API_KEY` is missing, tracing is switched off automatically, so the
 
 4. Click **Deploy**. Dependencies are installed from `uv.lock`.
 
-> ⚠️ **Keep `ALLOW_CODE_EXECUTION = "false"` on public deployments.** With it on, anyone who opens the app could approve code that runs on the server. If you leave out `OPENAI_API_KEY`, visitors can paste their own key in the sidebar instead (it's only kept for their session).
+> ⚠️ **Keep `ALLOW_CODE_EXECUTION = "false"` on public deployments.** With it on, anyone who opens the app could approve code that runs on the server. If you leave out `GROQ_API_KEY`, visitors can paste their own key in the sidebar instead (it's only kept for their session).
 
 ---
 
@@ -327,8 +352,10 @@ If `LANGSMITH_API_KEY` is missing, tracing is switched off automatically, so the
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `MODEL` | `openai:gpt-5-mini` | LLM as `provider:model` (e.g. `groq:llama-3.3-70b-versatile`) |
-| `OPENAI_API_KEY` / `GROQ_API_KEY` | — | Key for the chosen provider |
+| `MODEL` | `groq:openai/gpt-oss-120b` | LLM as `provider:model` (e.g. `groq:openai/gpt-oss-20b`, `openai:gpt-5-mini`) |
+| `GROQ_API_KEY` / `OPENAI_API_KEY` | — | Key for the chosen provider (names are case-sensitive on Linux) |
+| `MAX_RETRIES` | `6` | Retries with backoff on rate limits (429) |
+| `GROQ_TEMPERATURE` | `0.3` | Lower = more reliable tool calls on Groq |
 | `ALLOW_CODE_EXECUTION` | `true` | `false` = safe mode: no file writes, code runs or installs |
 | `APP_PASSWORD` | — | Optional password for the Streamlit app |
 | `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT` | — | LangSmith tracing |
@@ -343,13 +370,14 @@ If `LANGSMITH_API_KEY` is missing, tracing is switched off automatically, so the
 uv run pytest
 ```
 
-There are 22 tests. They use a scripted fake chat model (which also streams), so they run offline with no API key. They cover:
+There are 28 tests. They use a scripted fake chat model (which also streams) and a fake Groq client, so they run offline with no API key. They cover:
 - delegation and session notes
 - parallel delegation
 - the approve and reject flow
 - streaming events
 - tool sandboxing
 - model training
+- **Groq compatibility**: the real `ChatGroq` class with a fake HTTP client checks the message and tool payloads, streaming, and the `tool_use_failed` retry
 - the **Streamlit app itself**, via Streamlit's `AppTest`: chat, approval form and safe mode
 
 [GitHub Actions](.github/workflows/tests.yml) runs the suite on every push and pull request.
@@ -363,7 +391,7 @@ There are 22 tests. They use a scripted fake chat model (which also streams), so
 | Agents | LangChain 1.x (`create_agent`, tools, `init_chat_model`) |
 | Orchestration | LangGraph 1.x (`StateGraph`, `Send`, `interrupt`, streaming, checkpointers) |
 | Observability | LangSmith tracing |
-| LLMs | OpenAI GPT-5-mini, Groq Llama 3.3 70B |
+| LLMs | Groq (`openai/gpt-oss-120b`, `gpt-oss-20b`, `qwen3.8-27b`), OpenAI (optional) |
 | Memory | SQLite checkpointer (`langgraph-checkpoint-sqlite`) |
 | Interfaces | Streamlit, FastAPI (REST + SSE), terminal, LangGraph Studio |
 | Data & ML | pandas, NumPy, scikit-learn, Matplotlib, Seaborn |

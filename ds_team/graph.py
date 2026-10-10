@@ -9,6 +9,7 @@ answer comes back to the Team Leader as the tool result. `remember` calls store 
 in `notes`, the session memory. A checkpointer persists the whole state per thread.
 """
 import sqlite3
+import time
 from pathlib import Path
 from typing import Annotated, TypedDict
 
@@ -23,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from ds_team import config
 from ds_team.agents import AgentSpec, build_agents, enabled_specs
-from ds_team.config import DB_PATH, get_model
+from ds_team.config import DB_PATH, get_model, is_retryable_model_error
 
 # how many past user turns the Team Leader sees (older messages stay in the checkpoint)
 HISTORY_TURNS = 5
@@ -109,6 +110,17 @@ def _patch_dangling_tool_calls(messages: list[AnyMessage]) -> list[AnyMessage]:
     return patched
 
 
+def _invoke_with_retry(model, messages: list[AnyMessage], attempts: int = 3, delay: float = 2.0):
+    """Call the Team Leader model, retrying malformed tool calls (Groq `tool_use_failed`) and rate limits."""
+    for attempt in range(attempts):
+        try:
+            return model.invoke(messages)
+        except Exception as error:
+            if attempt == attempts - 1 or not is_retryable_model_error(error):
+                raise
+            time.sleep(delay * 2**attempt)
+
+
 def _format_notes(notes: dict[str, str]) -> str:
     return "\n".join(f"- {key}: {value}" for key, value in notes.items())
 
@@ -138,7 +150,7 @@ def build_graph(
         notes = _format_notes(state.get("notes") or {}) or "(none yet)"
         prompt = TEAM_LEADER_PROMPT.format(team=team, notes=notes, execution_note=execution_note)
         history = _patch_dangling_tool_calls(_recent_turns(state["messages"]))
-        response = leader_model.invoke([SystemMessage(prompt), *history])
+        response = _invoke_with_retry(leader_model, [SystemMessage(prompt), *history])
         return {"messages": [response]}
 
     def route_team_leader(state: TeamState) -> list[Send] | str:
